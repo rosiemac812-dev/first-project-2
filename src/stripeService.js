@@ -1,4 +1,29 @@
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const ENV_PATH = path.join(__dirname, '..', '.env');
+
+function loadEnvFile() {
+  if (fs.existsSync(ENV_PATH)) {
+    try {
+      const content = fs.readFileSync(ENV_PATH, 'utf8');
+      for (const line of content.split('\n')) {
+        const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
+        if (match) {
+          const k = match[1];
+          let v = (match[2] || '').trim();
+          if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
+          if (v.startsWith("'") && v.endsWith("'")) v = v.slice(1, -1);
+          process.env[k] = v;
+        }
+      }
+    } catch {}
+  }
+}
+
+// Load .env on boot
+loadEnvFile();
 
 /**
  * Stripe Balance & Connect Fund Flows Service
@@ -51,16 +76,87 @@ class StripeService {
     return entry;
   }
 
-  setApiKey(key) {
-    this.apiKey = key;
-    if (key && key.startsWith('sk_')) {
-      const Stripe = require('stripe');
-      this.stripeClient = new Stripe(key);
-      this.log(`Configured real Stripe secret key (${key.slice(0, 7)}...)`);
-    } else {
-      this.stripeClient = null;
-      this.log('Switched to simulated Stripe mode.');
+  getKeyConfig() {
+    const isLive = Boolean(this.stripeClient);
+    return {
+      connected: isLive,
+      mode: isLive ? (this.apiKey?.startsWith('sk_live_') ? 'live' : 'live_test') : 'simulated',
+      maskedKey: this.apiKey ? `${this.apiKey.slice(0, 8)}...${this.apiKey.slice(-4)}` : null,
+      livemode: isLive ? Boolean(this.apiKey?.startsWith('sk_live_')) : false
+    };
+  }
+
+  async verifyAndSetApiKey(rawKey) {
+    if (!rawKey || typeof rawKey !== 'string') {
+      const err = new Error('API key must be a non-empty string.');
+      err.statusCode = 400;
+      throw err;
     }
+
+    const key = rawKey.trim();
+    if (!key.startsWith('sk_test_') && !key.startsWith('sk_live_')) {
+      const err = new Error("Invalid Stripe key format. Key must begin with 'sk_test_' (or 'sk_live_').");
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const Stripe = require('stripe');
+    const client = new Stripe(key);
+
+    let balance;
+    try {
+      balance = await client.balance.retrieve();
+    } catch (stripeErr) {
+      const err = new Error(`Stripe authentication failed: ${stripeErr.message}`);
+      err.statusCode = stripeErr.statusCode || 401;
+      err.code = stripeErr.code || 'AUTHENTICATION_ERROR';
+      throw err;
+    }
+
+    // Key is verified and valid
+    this.apiKey = key;
+    this.stripeClient = client;
+
+    // Persist to .env safely (mode 0600)
+    try {
+      let envContent = '';
+      if (fs.existsSync(ENV_PATH)) {
+        envContent = fs.readFileSync(ENV_PATH, 'utf8');
+      }
+      const lines = envContent.split('\n').filter(l => !l.startsWith('STRIPE_SECRET_KEY='));
+      lines.push(`STRIPE_SECRET_KEY="${key}"`);
+      fs.writeFileSync(ENV_PATH, lines.join('\n').trim() + '\n', { mode: 0o600 });
+    } catch (writeErr) {
+      console.warn('Could not write to .env:', writeErr.message);
+    }
+
+    this.log(`Successfully verified and connected real Stripe key (${key.slice(0, 8)}...${key.slice(-4)}).`);
+
+    return {
+      connected: true,
+      mode: key.startsWith('sk_live_') ? 'live' : 'live_test',
+      maskedKey: `${key.slice(0, 8)}...${key.slice(-4)}`,
+      balance
+    };
+  }
+
+  disconnectApiKey() {
+    this.apiKey = null;
+    this.stripeClient = null;
+
+    try {
+      if (fs.existsSync(ENV_PATH)) {
+        const content = fs.readFileSync(ENV_PATH, 'utf8');
+        const lines = content.split('\n').filter(l => !l.startsWith('STRIPE_SECRET_KEY='));
+        fs.writeFileSync(ENV_PATH, lines.join('\n').trim() + '\n');
+      }
+    } catch {}
+
+    this.log('Disconnected real Stripe key. Switched back to high-fidelity simulator.');
+    return {
+      connected: false,
+      mode: 'simulated'
+    };
   }
 
   isLive() {
