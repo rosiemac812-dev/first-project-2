@@ -12,3 +12,5 @@ DerivedData/
 .cache/
 .DS_Store
 *.log
+.env
+.env.*
