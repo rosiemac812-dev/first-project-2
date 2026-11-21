@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('node:path');
 const authRouter = require('./src/authRouter');
+const stripeRouter = require('./src/stripeRouter');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,8 +21,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// Mount Authentication REST API
+// Mount Authentication & Stripe REST APIs
 app.use('/api/v1/auth', authRouter);
+app.use('/api/v1/stripe', stripeRouter);
 
 // Serve static assets and web UI
 app.use(express.static(path.join(__dirname)));
